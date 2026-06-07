@@ -1,0 +1,218 @@
+#!/bin/bash
+
+# ── Directories ──────────────────────────────────────────────────────────────
+SRC_DIR="/mnt/f/Tena_20260308/PN2017_fasta"
+WORK_DIR="${HOME}/GC_Tena_20260308/find_PN"
+mkdir -p "$WORK_DIR"
+
+# ── Target sequences ─────────────────────────────────────────────────────────
+TARGET="CAAATGGACTGGGC"
+LEFT_NEIGHBOR="GCCTATATCACCAGGCGACT"
+RIGHT_NEIGHBOR="GGCCACCCACAACAGATGCCG"
+
+# ── Output file ──────────────────────────────────────────────────────────────
+OUTFILE="${WORK_DIR}/found_sequences.txt"
+> "$OUTFILE"   # clear/create output file
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+for GZ_FILE in "${SRC_DIR}"/*.fastq.gz; do
+    BASENAME=$(basename "$GZ_FILE")                  # e.g. SRR5685313_1.fastq.gz
+    FASTQ_NAME="${BASENAME%.gz}"                     # e.g. SRR5685313_1.fastq
+    WORK_GZ="${WORK_DIR}/${BASENAME}"                # full path in linux dir
+    WORK_FASTQ="${WORK_DIR}/${FASTQ_NAME}"           # full path after gunzip
+
+    echo ">>> Processing: $BASENAME"
+
+    # 1. Copy from disk to linux directory (full paths on both ends)
+    cp "${SRC_DIR}/${BASENAME}" "${WORK_GZ}"
+
+    # 2. Gunzip in place
+    gunzip "${WORK_GZ}"                              # produces $WORK_FASTQ
+
+    # 3. Search: extract only sequence lines (line 2 of each 4-line block)
+    #    then filter for TARGET + (LEFT_NEIGHBOR OR RIGHT_NEIGHBOR)
+    MATCHES=$(awk 'NR%4==2' "${WORK_FASTQ}" | \
+              grep "$TARGET" | \
+              grep -E "${LEFT_NEIGHBOR}${TARGET}|${TARGET}${RIGHT_NEIGHBOR}")
+
+    COUNT=$(echo "$MATCHES" | grep -c '.' || true)
+
+    if [[ $COUNT -gt 0 ]]; then
+        echo "  ${COUNT} sequences found in ${FASTQ_NAME}:" | tee -a "$OUTFILE"
+        echo "$MATCHES" | while IFS= read -r seq; do
+            echo "    $seq" | tee -a "$OUTFILE"
+        done
+    else
+        echo "  No matching sequences in ${FASTQ_NAME}"
+    fi
+
+    # 4. Clean up: remove the unzipped fastq from linux directory
+    rm -f "${WORK_FASTQ}"
+
+    echo ""
+done
+
+echo "========================================"
+echo "Done! Results saved to: $OUTFILE"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/bin/bash
+
+# ── Directories ──────────────────────────────────────────────────────────────
+SRC_DIR="/mnt/f/Tena_20260308/PN2017_fasta"
+WORK_DIR="${HOME}/GC_Tena_20260308/find_PN"
+mkdir -p "$WORK_DIR"
+
+# ── Target sequences ─────────────────────────────────────────────────────────
+TARGET="CAAATGGACTGGGC"
+LEFT_NEIGHBOR="GCCTATATCACCAGGCGACT"
+RIGHT_NEIGHBOR="GGCCACCCACAACAGATGCCG"
+
+# ── Mutation thresholds ───────────────────────────────────────────────────────
+MAX_TARGET_MUT=2        # allowed mutations in TARGET alone
+MAX_TOTAL_MUT=4         # allowed mutations in LEFT+TARGET or TARGET+RIGHT combined
+
+# ── Output file ──────────────────────────────────────────────────────────────
+OUTFILE="${WORK_DIR}/found_sequences.txt"
+> "$OUTFILE"   # clear/create output file
+
+# ── Check that the Python regex module is available ───────────────────────────
+python3 -c "import regex" 2>/dev/null || {
+    echo "Python 'regex' module not found. Installing..."
+    pip install regex
+}
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+for GZ_FILE in "${SRC_DIR}"/*.fastq.gz; do
+    BASENAME=$(basename "$GZ_FILE")                  # e.g. SRR5685313_1.fastq.gz
+    FASTQ_NAME="${BASENAME%.gz}"                     # e.g. SRR5685313_1.fastq
+    WORK_GZ="${WORK_DIR}/${BASENAME}"                # full path in linux dir
+    WORK_FASTQ="${WORK_DIR}/${FASTQ_NAME}"           # full path after gunzip
+
+    echo ">>> Processing: $BASENAME"
+
+    # 1. Copy from disk to linux directory (full paths on both ends)
+    cp "${SRC_DIR}/${BASENAME}" "${WORK_GZ}"
+
+    # 2. Gunzip in place
+    gunzip "${WORK_GZ}"                              # produces $WORK_FASTQ
+
+    # 3. Fuzzy search via embedded Python
+    MATCHES=$(python3 << EOF
+import regex
+
+def best_fuzzy_match(seq, pattern, max_err):
+    """
+    Find the best (lowest edit distance) fuzzy match of pattern inside seq.
+    Edit distance counts substitutions, insertions, AND deletions.
+    Returns (match_object, edit_distance) or (None, inf) if none found.
+    """
+    # {e<=N} is regex module syntax: total edits (sub+ins+del) <= N
+    m = regex.search(f"({pattern}){{e<={max_err}}}", seq, flags=regex.BESTMATCH)
+    if m:
+        return m, sum(m.fuzzy_counts)  # fuzzy_counts = (sub, ins, del)
+    return None, float('inf')
+
+TARGET       = "${TARGET}"
+LEFT         = "${LEFT_NEIGHBOR}"
+RIGHT        = "${RIGHT_NEIGHBOR}"
+MAX_T_MUT    = ${MAX_TARGET_MUT}   # edits allowed in TARGET alone
+MAX_TOT_MUT  = ${MAX_TOTAL_MUT}    # edits allowed in LEFT+TARGET or TARGET+RIGHT combined
+FASTQ        = "${WORK_FASTQ}"
+
+matches = []
+
+with open(FASTQ) as f:
+    while True:
+        header = f.readline()
+        if not header:
+            break
+        seq  = f.readline().strip()   # line 2: sequence
+        plus = f.readline()           # line 3: +
+        qual = f.readline()           # line 4: quality
+
+        # ── Step 1: find best TARGET hit with <= MAX_T_MUT edits ─────────────
+        t_match, t_err = best_fuzzy_match(seq, TARGET, MAX_T_MUT)
+        if t_match is None:
+            continue                  # no TARGET hit → skip read
+
+        # t_start/t_end mark where TARGET aligned in seq (may differ from
+        # len(TARGET) due to indels)
+        t_start = t_match.start()
+        t_end   = t_match.end()
+
+        # ── Step 2a: check LEFT_NEIGHBOR immediately before TARGET ────────────
+        found = False
+
+        if t_start > 0:
+            # Search LEFT in the region ending at t_start, allowing remaining
+            # edit budget. We anchor to the right end of that region.
+            remaining = MAX_TOT_MUT - t_err
+            left_region = seq[:t_start]
+            # LEFT should end at t_start, so search with end-anchor in region
+            lm = regex.search(
+                f"({LEFT}){{e<={remaining}}}$",
+                left_region,
+                flags=regex.BESTMATCH
+            )
+            if lm:
+                l_err = sum(lm.fuzzy_counts)
+                if l_err + t_err <= MAX_TOT_MUT:
+                    found = True
+
+        # ── Step 2b: check RIGHT_NEIGHBOR immediately after TARGET ────────────
+        if not found and t_end < len(seq):
+            remaining = MAX_TOT_MUT - t_err
+            right_region = seq[t_end:]
+            # RIGHT should start at t_end, so search with start-anchor
+            rm = regex.search(
+                f"^({RIGHT}){{e<={remaining}}}",
+                right_region,
+                flags=regex.BESTMATCH
+            )
+            if rm:
+                r_err = sum(rm.fuzzy_counts)
+                if r_err + t_err <= MAX_TOT_MUT:
+                    found = True
+
+        if found:
+            matches.append(seq)
+
+for seq in matches:
+    print(seq)
+EOF
+)
+
+    COUNT=$(echo "$MATCHES" | grep -c '.' || true)
+
+    if [[ $COUNT -gt 0 ]]; then
+        echo "  ${COUNT} sequences found in ${FASTQ_NAME}:" | tee -a "$OUTFILE"
+        echo "$MATCHES" | while IFS= read -r seq; do
+            echo "    $seq" | tee -a "$OUTFILE"
+        done
+    else
+        echo "  No matching sequences in ${FASTQ_NAME}"
+    fi
+
+    # 4. Clean up: remove the unzipped fastq from linux directory
+    rm -f "${WORK_FASTQ}"
+
+    echo ""
+done
+
+echo "========================================"
+echo "Done! Results saved to: $OUTFILE"
