@@ -1,0 +1,7 @@
+    # 1. Copy from disk to linux directory (full paths on both ends)
+    cp -n "${SRC_DIR}/${BASENAME}" "${WORK_GZ}"
+
+    # 2. Gunzip in place (only if not already decompressed)
+    if [[ ! -f "${WORK_FASTQ}" ]]; then
+        gunzip "${WORK_GZ}"
+    fi
