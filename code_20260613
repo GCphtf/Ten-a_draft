@@ -1,0 +1,104 @@
+import pandas as pd
+import mygene
+from pathlib import Path
+
+input_path = Path(r"C:\Users\lilab\Desktop\GC\JH质谱20260613.csv")
+output_path = Path(r"C:\Users\lilab\Desktop\GC\JH质谱20260613_UniprotID.txt")
+check_path = Path(r"C:\Users\lilab\Desktop\GC\JH质谱20260613_UniprotID_mapping_check.csv")
+
+# True = include Swiss-Prot + TrEMBL
+# False = only reviewed Swiss-Prot IDs
+INCLUDE_TREMBL = True
+
+# Your file looks tab-separated, although named .csv.
+# sep=None lets pandas auto-detect comma/tab.
+df = pd.read_csv(input_path, sep=None, engine="python", dtype=str, encoding="utf-8-sig")
+df.columns = df.columns.str.strip()
+
+if "gene_id" not in df.columns:
+    raise ValueError("Cannot find column: gene_id")
+
+gene_ids = (
+    df["gene_id"]
+    .dropna()
+    .astype(str)
+    .str.strip()
+    .drop_duplicates()
+    .tolist()
+)
+
+mg = mygene.MyGeneInfo()
+
+# Drosophila melanogaster = fruitfly / taxid 7227
+# MyGene supports species restriction and fields/scopes in batch queries.
+# See MyGene query docs.
+results = mg.querymany(
+    gene_ids,
+    scopes="flybase",
+    fields="symbol,uniprot",
+    species="fruitfly",
+    as_dataframe=False,
+    verbose=False
+)
+
+def extract_uniprot_ids(uniprot_field):
+    ids = []
+
+    if isinstance(uniprot_field, dict):
+        swiss = uniprot_field.get("Swiss-Prot")
+        trembl = uniprot_field.get("TrEMBL")
+
+        if isinstance(swiss, list):
+            ids.extend(swiss)
+        elif isinstance(swiss, str):
+            ids.append(swiss)
+
+        if INCLUDE_TREMBL:
+            if isinstance(trembl, list):
+                ids.extend(trembl)
+            elif isinstance(trembl, str):
+                ids.append(trembl)
+
+    elif isinstance(uniprot_field, list):
+        ids.extend(uniprot_field)
+
+    elif isinstance(uniprot_field, str):
+        ids.append(uniprot_field)
+
+    return ids
+
+all_uniprot_ids = []
+seen = set()
+mapping_rows = []
+
+for r in results:
+    query = r.get("query")
+    symbol = r.get("symbol", "")
+    notfound = r.get("notfound", False)
+
+    ids = extract_uniprot_ids(r.get("uniprot"))
+
+    mapping_rows.append({
+        "gene_id": query,
+        "mapped_symbol": symbol,
+        "uniprot_ids": ";".join(ids),
+        "notfound": notfound
+    })
+
+    for uid in ids:
+        if uid not in seen:
+            seen.add(uid)
+            all_uniprot_ids.append(uid)
+
+# Save UniProt IDs: one ID per row
+with open(output_path, "w", encoding="utf-8") as f:
+    for uid in all_uniprot_ids:
+        f.write(uid + "\n")
+
+# Optional QC file, useful for checking unmapped genes
+pd.DataFrame(mapping_rows).to_csv(check_path, index=False, encoding="utf-8-sig")
+
+print(f"Input genes: {len(gene_ids)}")
+print(f"UniProt IDs saved: {len(all_uniprot_ids)}")
+print(f"Output file: {output_path}")
+print(f"QC mapping file: {check_path}")
